@@ -1,0 +1,6 @@
+{
+  "name": "Employee Profile Management System",
+  "description": "A responsive, production-ready web application for managing employee profiles and records with Google Sheets backend integration.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
