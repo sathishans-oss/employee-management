@@ -28,10 +28,10 @@ function getBackendUrl(): string {
  * NOTE: Passwords, password hashes, secrets, and reset tokens are NEVER logged to console.
  */
 async function callGoogleAppsScript<T = any>(payload: Record<string, any>): Promise<ApiResponse<T>> {
-  const url = getBackendUrl();
+  const directUrl = getBackendUrl();
   const actionName = payload?.action || 'unknown';
 
-  if (!url) {
+  if (!directUrl) {
     console.warn(`[API Diagnostic] Action: "${actionName}" failed - Web App URL is empty.`);
     return {
       success: false,
@@ -39,44 +39,78 @@ async function callGoogleAppsScript<T = any>(payload: Record<string, any>): Prom
     };
   }
 
+  const isBrowser = typeof window !== 'undefined';
+  const proxyEndpoint = '/api/apps-script';
+
   try {
-    console.log(`[API Diagnostic] Sending action: "${actionName}" to Google Apps Script.`);
+    let response: Response | null = null;
+    let usedUrl = directUrl;
 
-    // Send as text/plain to prevent CORS preflight OPTIONS failure in Google Apps Script Web Apps
-    const response = await fetch(url, {
-      method: 'POST',
-      mode: 'cors',
-      redirect: 'follow',
-      headers: {
-        'Content-Type': 'text/plain;charset=utf-8',
-      },
-      body: JSON.stringify(payload),
-    });
+    // 1. In Google AI Studio / Node environment, use same-origin server proxy to completely bypass iframe cross-origin redirect/CORS restrictions
+    if (isBrowser) {
+      try {
+        const proxyRes = await fetch(proxyEndpoint, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(payload),
+        });
 
-    console.log(`[API Diagnostic] Action: "${actionName}" received HTTP status ${response.status}.`);
+        // If proxy endpoint responded (not a 404 from static host)
+        if (proxyRes.status !== 404 && proxyRes.status !== 502) {
+          response = proxyRes;
+          usedUrl = proxyEndpoint;
+        }
+      } catch {
+        // Fall back to direct fetch if proxy is not reachable
+      }
+    }
+
+    // 2. Direct fetch fallback (used when deployed on standalone static hosts like Cloudflare Pages)
+    if (!response) {
+      usedUrl = directUrl;
+      response = await fetch(directUrl, {
+        method: 'POST',
+        mode: 'cors',
+        redirect: 'follow',
+        headers: {
+          'Content-Type': 'text/plain;charset=utf-8',
+        },
+        body: JSON.stringify(payload),
+      });
+    }
+
+    const contentType = response.headers.get('content-type') || 'unknown';
+    console.log(`[API Diagnostic] Action: "${actionName}" | Target: ${usedUrl === proxyEndpoint ? 'Internal Proxy (/api/apps-script)' : 'Direct Apps Script'} | HTTP Status: ${response.status} | Content-Type: ${contentType}`);
 
     if (!response.ok) {
-      console.warn(`[API Diagnostic] Action: "${actionName}" HTTP error: ${response.status} ${response.statusText}`);
+      console.warn(`[API Diagnostic] Action: "${actionName}" HTTP error: ${response.status}`);
       return {
         success: false,
-        error: `Server responded with HTTP ${response.status}. Please check your Google Apps Script deployment.`,
+        error: `Google Apps Script returned HTTP ${response.status}.`,
       };
     }
 
     const rawText = await response.text();
+    console.log(`[API Diagnostic] Action: "${actionName}" | Response text length: ${rawText.length}`);
     
     try {
       const jsonResult: ApiResponse<T> = JSON.parse(rawText);
-      console.log(`[API Diagnostic] Action: "${actionName}" response parsed. Success: ${jsonResult.success}`);
+      console.log(`[API Diagnostic] Action: "${actionName}" | Parsed Success: ${jsonResult.success} | Parsed Error: ${jsonResult.error || 'none'}`);
+      
       if (!jsonResult.success && jsonResult.error) {
-        console.info(`[API Diagnostic] Action: "${actionName}" backend error message: ${jsonResult.error}`);
+        return {
+          success: false,
+          error: jsonResult.error,
+        };
       }
       return jsonResult;
-    } catch (parseError) {
-      console.error(`[API Diagnostic] Action: "${actionName}" returned non-JSON response:`, rawText.slice(0, 150));
+    } catch {
+      console.error(`[API Diagnostic] Action: "${actionName}" returned non-JSON response.`);
       return {
         success: false,
-        error: 'Google Apps Script returned an unexpected non-JSON response. Please ensure your Apps Script is deployed as a Web App with "Execute as: Me" and "Who has access: Anyone".',
+        error: 'The server returned an unexpected response.',
       };
     }
   } catch (networkErr: unknown) {
@@ -84,7 +118,7 @@ async function callGoogleAppsScript<T = any>(payload: Record<string, any>): Prom
     console.error(`[API Diagnostic] Action: "${actionName}" network/fetch failed:`, errMessage);
     return {
       success: false,
-      error: 'Unable to connect to Google Sheets server. Please verify your Web App URL and internet connection.',
+      error: 'Unable to reach the Google Apps Script server. Please check your internet connection.',
     };
   }
 }

@@ -54,7 +54,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   // Login handler
   const login = async (credentials: LoginCredentials): Promise<{ success: boolean; error?: string }> => {
-    setIsLoading(true);
     try {
       const response = await ApiService.login(credentials);
 
@@ -66,16 +65,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       } else {
         return {
           success: false,
-          error: response.error || 'Invalid credentials. Please try again.',
+          error: response.error || 'Invalid Employee ID or password.',
         };
       }
     } catch (err: any) {
       return {
         success: false,
-        error: err?.message || 'Something went wrong. Please try again.',
+        error: err?.message || 'Unable to reach the server. Please check your internet connection and try again.',
       };
-    } finally {
-      setIsLoading(false);
     }
   };
 

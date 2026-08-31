@@ -11,6 +11,7 @@ import {
   ArrowLeft,
   CheckCircle2,
   ShieldCheck,
+  Loader2,
 } from 'lucide-react';
 import { ErrorMessage } from './ErrorMessage';
 import { LoadingSpinner } from './LoadingSpinner';
@@ -24,7 +25,7 @@ interface LoginFormProps {
 type AuthMode = 'LOGIN' | 'FORGOT_VERIFY' | 'FORGOT_RESET';
 
 export const LoginForm: React.FC<LoginFormProps> = ({ onLoginSuccess }) => {
-  const { login, isLoading: isAuthLoading } = useAuth();
+  const { login } = useAuth();
 
   const [mode, setMode] = useState<AuthMode>('LOGIN');
 
@@ -32,6 +33,7 @@ export const LoginForm: React.FC<LoginFormProps> = ({ onLoginSuccess }) => {
   const [employeeId, setEmployeeId] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
+  const [isLoggingIn, setIsLoggingIn] = useState(false);
 
   // Forgot Password - Step 1 (DOB Verification) state
   const [forgotEmpId, setForgotEmpId] = useState('');
@@ -54,6 +56,8 @@ export const LoginForm: React.FC<LoginFormProps> = ({ onLoginSuccess }) => {
   // Handle standard Login
   const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isLoggingIn) return;
+
     setErrorMessage(null);
     setSuccessMessage(null);
 
@@ -63,17 +67,28 @@ export const LoginForm: React.FC<LoginFormProps> = ({ onLoginSuccess }) => {
       return;
     }
 
-    const result = await login({
-      employeeId: trimmedId,
-      password: password,
-    });
+    setIsLoggingIn(true);
 
-    if (result.success) {
-      if (onLoginSuccess) {
-        onLoginSuccess();
+    try {
+      const result = await login({
+        employeeId: trimmedId,
+        password: password,
+      });
+
+      if (result.success) {
+        if (onLoginSuccess) {
+          onLoginSuccess();
+        }
+      } else {
+        setErrorMessage(result.error || 'Invalid Employee ID or password.');
+        setPassword('');
+        setIsLoggingIn(false);
       }
-    } else {
-      setErrorMessage(result.error || 'Invalid Employee ID or password.');
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Unable to reach the server. Please check your internet connection and try again.';
+      setErrorMessage(msg);
+      setPassword('');
+      setIsLoggingIn(false);
     }
   };
 
@@ -131,8 +146,9 @@ export const LoginForm: React.FC<LoginFormProps> = ({ onLoginSuccess }) => {
         // Strict security requirement: generic error message
         setErrorMessage(res.error || 'Employee ID or Date of Birth is incorrect.');
       }
-    } catch {
-      setErrorMessage('Employee ID or Date of Birth is incorrect.');
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Unable to reach the Google Apps Script server. Please check your internet connection.';
+      setErrorMessage(msg);
     } finally {
       setIsVerifyingDob(false);
     }
@@ -182,8 +198,9 @@ export const LoginForm: React.FC<LoginFormProps> = ({ onLoginSuccess }) => {
       } else {
         setErrorMessage(res.error || 'Failed to update password. Please verify your details again.');
       }
-    } catch {
-      setErrorMessage('Something went wrong updating password. Please try again.');
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Something went wrong updating password. Please try again.';
+      setErrorMessage(msg);
     } finally {
       setIsResettingPassword(false);
     }
@@ -252,7 +269,7 @@ export const LoginForm: React.FC<LoginFormProps> = ({ onLoginSuccess }) => {
                     value={employeeId}
                     onChange={(e) => setEmployeeId(e.target.value)}
                     placeholder="e.g. EMP001 or ADM001"
-                    disabled={isAuthLoading}
+                    disabled={isLoggingIn}
                     autoComplete="username"
                     className="w-full pl-10 pr-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm font-medium text-slate-900 placeholder:text-slate-400 focus:bg-white focus:outline-hidden focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all disabled:opacity-60"
                   />
@@ -272,7 +289,8 @@ export const LoginForm: React.FC<LoginFormProps> = ({ onLoginSuccess }) => {
                     type="button"
                     id="forgot-password-link-btn"
                     onClick={handleOpenForgotPassword}
-                    className="text-xs font-semibold text-blue-600 hover:text-blue-700 transition-colors focus:outline-hidden"
+                    disabled={isLoggingIn}
+                    className="text-xs font-semibold text-blue-600 hover:text-blue-700 transition-colors focus:outline-hidden disabled:opacity-60"
                   >
                     Forgot Password?
                   </button>
@@ -288,7 +306,7 @@ export const LoginForm: React.FC<LoginFormProps> = ({ onLoginSuccess }) => {
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
                     placeholder="••••••••"
-                    disabled={isAuthLoading}
+                    disabled={isLoggingIn}
                     autoComplete="current-password"
                     className="w-full pl-10 pr-11 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm font-medium text-slate-900 placeholder:text-slate-400 focus:bg-white focus:outline-hidden focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all disabled:opacity-60"
                   />
@@ -297,7 +315,8 @@ export const LoginForm: React.FC<LoginFormProps> = ({ onLoginSuccess }) => {
                     id="toggle-password-visibility-btn"
                     onClick={() => setShowPassword(!showPassword)}
                     tabIndex={-1}
-                    className="absolute inset-y-0 right-0 pr-3.5 flex items-center text-slate-400 hover:text-slate-600 transition-colors"
+                    disabled={isLoggingIn}
+                    className="absolute inset-y-0 right-0 pr-3.5 flex items-center text-slate-400 hover:text-slate-600 transition-colors disabled:opacity-60"
                     aria-label={showPassword ? 'Hide password' : 'Show password'}
                   >
                     {showPassword ? (
@@ -313,11 +332,14 @@ export const LoginForm: React.FC<LoginFormProps> = ({ onLoginSuccess }) => {
               <button
                 type="submit"
                 id="login-submit-btn"
-                disabled={isAuthLoading}
+                disabled={isLoggingIn}
                 className="w-full mt-2 py-3.5 px-4 bg-blue-600 hover:bg-blue-700 active:bg-blue-800 text-white font-semibold text-sm rounded-xl shadow-md shadow-blue-500/20 transition-all flex items-center justify-center gap-2 disabled:opacity-70 disabled:cursor-not-allowed"
               >
-                {isAuthLoading ? (
-                  <LoadingSpinner size="sm" message="Authenticating..." />
+                {isLoggingIn ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin text-white" />
+                    <span>Signing in...</span>
+                  </>
                 ) : (
                   <>
                     <LogIn className="w-4 h-4" />
