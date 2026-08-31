@@ -19,18 +19,22 @@ export const GOOGLE_APPS_SCRIPT_URL =
  * Determines whether to route API requests through the local Express proxy (/api/apps-script)
  * or communicate directly with the Google Apps Script Web App URL.
  * 
- * - Google AI Studio / Cloud Run (server.ts running): uses /api/apps-script to avoid iframe cross-origin redirect blocks.
- * - Cloudflare Pages / Static Deployments (no Express backend): communicates directly with Google Apps Script Web App.
+ * - Google AI Studio / Cloud Run (server.ts running): VITE_USE_APPS_SCRIPT_PROXY=true -> uses /api/apps-script
+ * - Cloudflare Pages / Static Deployments (no Express backend): VITE_USE_APPS_SCRIPT_PROXY=false -> communicates directly with Google Apps Script
  */
 export function shouldUseAppsScriptProxy(): boolean {
-  const envVal = (import.meta as any).env?.VITE_USE_APPS_SCRIPT_PROXY;
-  if (envVal !== undefined && envVal !== '') {
-    return envVal === 'true' || envVal === true;
+  // Read VITE_USE_APPS_SCRIPT_PROXY build/runtime variable
+  const rawEnv = (import.meta as any).env?.VITE_USE_APPS_SCRIPT_PROXY;
+  
+  if (rawEnv !== undefined && rawEnv !== '') {
+    // Strictly evaluate 'true' vs 'false' (do not treat arbitrary non-empty strings as true)
+    return rawEnv === 'true' || rawEnv === true;
   }
 
+  // Automatic hostname detection when environment variable is not explicitly defined
   if (typeof window !== 'undefined') {
     const hostname = window.location.hostname;
-    // Static hosting environments without Express backend
+    // Static hosting environments without Express backend (e.g. Cloudflare Pages)
     if (
       hostname.endsWith('.pages.dev') ||
       hostname.endsWith('.workers.dev') ||
@@ -40,7 +44,7 @@ export function shouldUseAppsScriptProxy(): boolean {
     ) {
       return false;
     }
-    // Environments with server.ts running
+    // Environments with Express server.ts running (e.g. Google AI Studio / Cloud Run)
     if (hostname.includes('.run.app') || hostname === 'localhost' || hostname === '127.0.0.1') {
       return true;
     }
