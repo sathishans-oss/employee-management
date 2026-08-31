@@ -139,3 +139,15 @@ To safely create the database headers and your initial administrator account wit
 3. **Tamper-Proof Session Tokens**:
    - Session tokens are signed using HMAC-SHA256 with a unique server secret key stored in Google Apps Script `PropertiesService` to prevent forged requests.
 
+4. **Date of Birth (DOB) Identity Verification & Password Reset**:
+   - **Backend-Only Verification**: Verification is performed directly on the Google Apps Script backend. The employee's stored Date of Birth and account existence are never revealed to the frontend on mismatch (returns generic error: `"Employee ID or Date of Birth is incorrect."`).
+   - **Rate Limiting Protection**: Protects against brute-force verification attacks by rate-limiting failed DOB verification attempts.
+   - **Cryptographic Reset Authorization**: Upon successful DOB match, the server generates an HMAC-signed reset token with a strict 10-minute validity window.
+   - **Atomic Concurrency Protection & Single-Use Enforcement**:
+     - `LockService.getScriptLock()` provides concurrency protection ensuring atomic check-and-consume behavior during simultaneous reset requests with a bounded 10-second timeout.
+     - `PropertiesService` provides persistent consumed-token state storage across distributed Apps Script execution instances.
+     - `CacheService` is used only as a supplementary fast-access cache layer (not as a lock).
+     - Once consumed to reset the password, the token is permanently invalidated in persistent storage to prevent replay attacks and race conditions.
+   - **Salted SHA-256 Hashing**: New passwords are cryptographically hashed on the backend with a unique salt and server-side pepper before being stored in the `Employees` sheet.
+
+

@@ -26,6 +26,21 @@ export interface LoginCredentials {
   password: string;
 }
 
+export interface VerifyDobRequest {
+  employeeId: string;
+  dateOfBirth: string;
+}
+
+export interface VerifyDobResponseData {
+  resetToken: string;
+  employeeId: string;
+}
+
+export interface ResetPasswordRequest {
+  resetToken: string;
+  newPassword: string;
+}
+
 export interface ApiResponse<T = any> {
   success: boolean;
   message?: string;

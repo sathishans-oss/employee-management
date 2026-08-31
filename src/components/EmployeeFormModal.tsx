@@ -6,6 +6,7 @@ import {
   validateDateOfBirth,
   validatePhoneNumber,
   validatePassword,
+  normalizeDob,
 } from '../utils/validation';
 import { User, Hash, Calendar, Heart, Phone, Lock, X, Check, AlertCircle } from 'lucide-react';
 import { ErrorMessage } from './ErrorMessage';
@@ -45,7 +46,7 @@ export const EmployeeFormModal: React.FC<EmployeeFormModalProps> = ({
       setFormData({
         employeeId: initialData.employeeId,
         employeeName: initialData.employeeName,
-        dateOfBirth: initialData.dateOfBirth,
+        dateOfBirth: normalizeDob(initialData.dateOfBirth) || initialData.dateOfBirth || '',
         hobby: initialData.hobby || '',
         phoneNumber: initialData.phoneNumber || '',
         role: initialData.role,

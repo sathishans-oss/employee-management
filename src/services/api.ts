@@ -7,7 +7,8 @@
  */
 
 import { APP_CONFIG, GOOGLE_APPS_SCRIPT_URL } from '../config';
-import { ApiResponse, AuthUser, Employee, EmployeeFormData, LoginCredentials } from '../types';
+import { ApiResponse, AuthUser, Employee, EmployeeFormData, LoginCredentials, VerifyDobResponseData } from '../types';
+import { normalizeDob } from '../utils/validation';
 
 /**
  * Returns whether live backend mode is active.
@@ -24,12 +25,14 @@ function getBackendUrl(): string {
 
 /**
  * Helper to make POST requests to Google Apps Script Web App
- * NOTE: Passwords and session tokens are strictly transmitted over HTTPS and never logged to console.
+ * NOTE: Passwords, password hashes, secrets, and reset tokens are NEVER logged to console.
  */
 async function callGoogleAppsScript<T = any>(payload: Record<string, any>): Promise<ApiResponse<T>> {
   const url = getBackendUrl();
+  const actionName = payload?.action || 'unknown';
 
   if (!url) {
+    console.warn(`[API Diagnostic] Action: "${actionName}" failed - Web App URL is empty.`);
     return {
       success: false,
       error: 'Google Apps Script Web App URL is not configured. Please verify src/config.ts.',
@@ -37,27 +40,48 @@ async function callGoogleAppsScript<T = any>(payload: Record<string, any>): Prom
   }
 
   try {
+    console.log(`[API Diagnostic] Sending action: "${actionName}" to Google Apps Script.`);
+
     // Send as text/plain to prevent CORS preflight OPTIONS failure in Google Apps Script Web Apps
     const response = await fetch(url, {
       method: 'POST',
       mode: 'cors',
+      redirect: 'follow',
       headers: {
         'Content-Type': 'text/plain;charset=utf-8',
       },
       body: JSON.stringify(payload),
     });
 
+    console.log(`[API Diagnostic] Action: "${actionName}" received HTTP status ${response.status}.`);
+
     if (!response.ok) {
+      console.warn(`[API Diagnostic] Action: "${actionName}" HTTP error: ${response.status} ${response.statusText}`);
       return {
         success: false,
-        error: 'Unable to connect to Google Sheets server. Please try again.',
+        error: `Server responded with HTTP ${response.status}. Please check your Google Apps Script deployment.`,
       };
     }
 
-    const jsonResult: ApiResponse<T> = await response.json();
-    return jsonResult;
-  } catch (_err: unknown) {
-    // Return clean user-facing error without leaking technical stack traces or internal secrets
+    const rawText = await response.text();
+    
+    try {
+      const jsonResult: ApiResponse<T> = JSON.parse(rawText);
+      console.log(`[API Diagnostic] Action: "${actionName}" response parsed. Success: ${jsonResult.success}`);
+      if (!jsonResult.success && jsonResult.error) {
+        console.info(`[API Diagnostic] Action: "${actionName}" backend error message: ${jsonResult.error}`);
+      }
+      return jsonResult;
+    } catch (parseError) {
+      console.error(`[API Diagnostic] Action: "${actionName}" returned non-JSON response:`, rawText.slice(0, 150));
+      return {
+        success: false,
+        error: 'Google Apps Script returned an unexpected non-JSON response. Please ensure your Apps Script is deployed as a Web App with "Execute as: Me" and "Who has access: Anyone".',
+      };
+    }
+  } catch (networkErr: unknown) {
+    const errMessage = networkErr instanceof Error ? networkErr.message : String(networkErr);
+    console.error(`[API Diagnostic] Action: "${actionName}" network/fetch failed:`, errMessage);
     return {
       success: false,
       error: 'Unable to connect to Google Sheets server. Please verify your Web App URL and internet connection.',
@@ -473,6 +497,157 @@ export const ApiService = {
     saveMockDatabase(db);
 
     return { success: true, message: 'Password changed successfully.' };
+  },
+
+  /**
+   * 7. Verify Date of Birth for Forgot Password
+   * Compares employee ID and DOB on the backend without leaking stored details.
+   */
+  async verifyDob(employeeId: string, dateOfBirth: string): Promise<ApiResponse<VerifyDobResponseData>> {
+    const cleanId = employeeId.trim().toUpperCase();
+    const cleanDob = normalizeDob(dateOfBirth);
+
+    if (!cleanId || !cleanDob) {
+      return {
+        success: false,
+        error: 'Employee ID and Date of Birth are required.',
+      };
+    }
+
+    // Direct Google Apps Script integration (Strict production authoritative mode)
+    if (isLiveBackendConfigured()) {
+      return await callGoogleAppsScript<VerifyDobResponseData>({
+        action: 'verifyDob',
+        employeeId: cleanId,
+        dateOfBirth: cleanDob,
+      });
+    }
+
+    if (!APP_CONFIG.USE_MOCK_API) {
+      return {
+        success: false,
+        error: 'Google Apps Script Web App URL is not configured. Please set GOOGLE_APPS_SCRIPT_URL in src/config.ts.',
+      };
+    }
+
+    // Development-only mock mode
+    await delay();
+    const db = getMockDatabase();
+    const emp = db.find((e) => e.employeeId.toUpperCase() === cleanId);
+
+    if (!emp) {
+      return {
+        success: false,
+        error: 'Employee ID or Date of Birth is incorrect.',
+      };
+    }
+
+    const storedDobNormalized = normalizeDob(emp.dateOfBirth);
+    if (!storedDobNormalized || storedDobNormalized !== cleanDob) {
+      return {
+        success: false,
+        error: 'Employee ID or Date of Birth is incorrect.',
+      };
+    }
+
+    if (emp.status !== 'ACTIVE') {
+      return {
+        success: false,
+        error: 'Your account is inactive. Please contact the administrator.',
+      };
+    }
+
+    // Generate mock temporary reset token
+    const mockResetToken = `mock-reset-token-${btoa(cleanId + ':' + Date.now())}`;
+
+    return {
+      success: true,
+      message: 'Identity verified. You can now set a new password.',
+      data: {
+        resetToken: mockResetToken,
+        employeeId: cleanId,
+      },
+    };
+  },
+
+  /**
+   * 8. Secure Password Reset using verified reset token
+   */
+  async resetPassword(resetToken: string, newPassword: string): Promise<ApiResponse<void>> {
+    const token = resetToken?.trim();
+    const pwd = newPassword;
+
+    if (!token || !pwd) {
+      return {
+        success: false,
+        error: 'Reset authorization and new password are required.',
+      };
+    }
+
+    if (pwd.length < 6) {
+      return {
+        success: false,
+        error: 'Password must be at least 6 characters long.',
+      };
+    }
+
+    // Direct Google Apps Script integration (Strict production authoritative mode)
+    if (isLiveBackendConfigured()) {
+      return await callGoogleAppsScript<void>({
+        action: 'resetPassword',
+        resetToken: token,
+        newPassword: pwd,
+      });
+    }
+
+    if (!APP_CONFIG.USE_MOCK_API) {
+      return {
+        success: false,
+        error: 'Google Apps Script Web App URL is not configured. Please set GOOGLE_APPS_SCRIPT_URL in src/config.ts.',
+      };
+    }
+
+    // Development-only mock mode
+    await delay();
+    try {
+      if (!token.startsWith('mock-reset-token-')) {
+        return { success: false, error: 'Invalid or expired reset authorization.' };
+      }
+
+      // Check single-use token consumption in mock mode
+      const usedTokens: string[] = JSON.parse(sessionStorage.getItem('used_mock_reset_tokens') || '[]');
+      if (usedTokens.includes(token)) {
+        return { success: false, error: 'This reset authorization has already been used. Please request a new verification.' };
+      }
+
+      const raw = atob(token.replace('mock-reset-token-', ''));
+      const [empId, timeStr] = raw.split(':');
+      const time = parseInt(timeStr, 10);
+      if (Date.now() - time > 10 * 60 * 1000) {
+        return { success: false, error: 'Reset session has expired. Please verify your Date of Birth again.' };
+      }
+
+      const db = getMockDatabase();
+      const index = db.findIndex((e) => e.employeeId.toUpperCase() === empId.toUpperCase());
+      if (index === -1) {
+        return { success: false, error: 'Employee not found.' };
+      }
+
+      // Mark token as consumed
+      usedTokens.push(token);
+      sessionStorage.setItem('used_mock_reset_tokens', JSON.stringify(usedTokens));
+
+      db[index].passwordHash = pwd;
+      db[index].updatedAt = new Date().toISOString().split('T')[0];
+      saveMockDatabase(db);
+
+      return {
+        success: true,
+        message: 'Password changed successfully. Please login with your new password.',
+      };
+    } catch {
+      return { success: false, error: 'Invalid reset authorization.' };
+    }
   },
 
   /**

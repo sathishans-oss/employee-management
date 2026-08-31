@@ -63,6 +63,8 @@ function doPost(e) {
     }
 
     var action = params.action;
+    console.log('[API doPost] Received action: ' + (action || 'none') + ' | target ID: ' + (params.employeeId ? params.employeeId.toString().toUpperCase() : 'N/A'));
+
     var result = { success: false, error: 'Invalid or missing action parameter.' };
 
     switch (action) {
@@ -90,14 +92,26 @@ function doPost(e) {
         result = handleChangePassword(params.employeeId, params.newPassword, params.sessionToken);
         break;
 
+      case 'verifyDob':
+        result = handleVerifyDob(params.employeeId, params.dateOfBirth || params.dob);
+        break;
+
+      case 'resetPassword':
+        result = handleResetPassword(params.resetToken, params.newPassword);
+        break;
+
       default:
+        console.warn('[API doPost] Unknown action received: ' + action);
         result = { success: false, error: 'Unknown action: ' + action };
     }
+
+    console.log('[API doPost] Action: ' + action + ' completed with success: ' + result.success);
 
     return ContentService.createTextOutput(JSON.stringify(result))
       .setMimeType(ContentService.MimeType.JSON);
 
   } catch (err) {
+    console.error('[API doPost] Unhandled exception: ' + err.toString());
     return ContentService.createTextOutput(JSON.stringify({
       success: false,
       error: 'Backend execution error: ' + err.toString()
@@ -275,12 +289,12 @@ function handleAddEmployee(params, sessionToken) {
 
   var cleanId = (params.employeeId || '').toString().trim().toUpperCase();
   var cleanName = (params.employeeName || '').toString().trim();
-  var dob = (params.dateOfBirth || '').toString().trim();
+  var normDob = normalizeDob(params.dateOfBirth);
   var password = (params.password || '').toString();
 
   // Validate required fields
-  if (!cleanId || !cleanName || !dob || !password) {
-    return { success: false, error: 'Employee ID, Name, Date of Birth, and Password are required.' };
+  if (!cleanId || !cleanName || !normDob || !password) {
+    return { success: false, error: 'Employee ID, Name, a valid Date of Birth (in the past), and Password are required.' };
   }
 
   var sheet = getOrCreateSheet();
@@ -304,7 +318,7 @@ function handleAddEmployee(params, sessionToken) {
   sheet.appendRow([
     cleanId,
     cleanName,
-    dob,
+    normDob,
     hobby,
     phone,
     passHash,
@@ -320,7 +334,7 @@ function handleAddEmployee(params, sessionToken) {
     data: {
       employeeId: cleanId,
       employeeName: cleanName,
-      dateOfBirth: dob,
+      dateOfBirth: normDob,
       hobby: hobby,
       phoneNumber: phone,
       role: role,
@@ -366,8 +380,12 @@ function handleUpdateEmployee(params, sessionToken) {
   if (params.employeeName !== undefined && params.employeeName !== '') {
     sheet.getRange(rowIndex, 2).setValue(params.employeeName.toString().trim());
   }
-  if (params.dateOfBirth !== undefined && params.dateOfBirth !== '') {
-    sheet.getRange(rowIndex, 3).setValue(params.dateOfBirth.toString().trim());
+  if (params.dateOfBirth !== undefined) {
+    var normDob = normalizeDob(params.dateOfBirth);
+    if (!normDob) {
+      return { success: false, error: 'A valid calendar Date of Birth (in the past) is required.' };
+    }
+    sheet.getRange(rowIndex, 3).setValue(normDob);
   }
   if (params.hobby !== undefined) {
     sheet.getRange(rowIndex, 4).setValue(params.hobby.toString().trim());
@@ -439,6 +457,354 @@ function handleChangePassword(employeeId, newPassword, sessionToken) {
   }
 
   return { success: false, error: 'Employee not found.' };
+}
+
+// ==========================================
+// 6b. FORGOT PASSWORD - DOB VERIFICATION & SECURE RESET
+// ==========================================
+
+/**
+ * Verifies Employee ID and Date of Birth on the backend.
+ * Never leaks the stored DOB or whether the Employee ID exists on mismatch.
+ * Enforces rate limiting against brute-force attempts.
+ */
+function handleVerifyDob(employeeId, dob) {
+  if (!employeeId || !dob) {
+    return { success: false, error: 'Employee ID and Date of Birth are required.' };
+  }
+
+  var cleanId = employeeId.toString().trim().toUpperCase();
+  var normalizedInputDob = normalizeDob(dob);
+
+  if (!normalizedInputDob) {
+    return { success: false, error: 'Please enter a valid Date of Birth.' };
+  }
+
+  // Rate limiting check (max 5 failed attempts per 15 minutes per Employee ID)
+  if (!checkDobRateLimit(cleanId)) {
+    return { success: false, error: 'Too many failed verification attempts. Please try again after 15 minutes.' };
+  }
+
+  var sheet = getOrCreateSheet();
+  var data = sheet.getDataRange().getValues();
+  var match = false;
+  var statusActive = false;
+
+  for (var i = 1; i < data.length; i++) {
+    var row = data[i];
+    var rowEmpId = (row[0] || '').toString().trim().toUpperCase();
+    var rowDob = row[2];
+    var rowStatus = (row[7] || 'ACTIVE').toString().trim().toUpperCase();
+
+    if (rowEmpId === cleanId) {
+      var normalizedStoredDob = normalizeDob(rowDob);
+      if (normalizedStoredDob && normalizedStoredDob === normalizedInputDob) {
+        match = true;
+        statusActive = (rowStatus === 'ACTIVE');
+      }
+      break;
+    }
+  }
+
+  // Generic error on mismatch: never reveal if Employee ID exists
+  if (!match) {
+    recordFailedDobAttempt(cleanId);
+    return { success: false, error: 'Employee ID or Date of Birth is incorrect.' };
+  }
+
+  // Check account status
+  if (!statusActive) {
+    return { success: false, error: 'Your account is inactive. Please contact the administrator.' };
+  }
+
+  // Clear failed attempt counter on success
+  clearDobRateLimit(cleanId);
+
+  // Generate a cryptographically signed, short-lived (10 min), single-use reset token
+  var resetToken = generateResetToken(cleanId);
+
+  return {
+    success: true,
+    message: 'Identity verified. You can now set a new password.',
+    data: {
+      resetToken: resetToken,
+      employeeId: cleanId
+    }
+  };
+}
+
+/**
+ * Resets an employee password using a valid temporary reset token.
+ * Validates HMAC signature, 10-minute expiration, and single-use status.
+ * Replaces password with salted SHA-256 hash.
+ */
+function handleResetPassword(resetToken, newPassword) {
+  if (!resetToken || !newPassword) {
+    return { success: false, error: 'Reset token and new password are required.' };
+  }
+
+  if (newPassword.length < 6) {
+    return { success: false, error: 'Password must be at least 6 characters long.' };
+  }
+
+  // Validate reset token
+  var verification = verifyAndConsumeResetToken(resetToken);
+  if (!verification.valid) {
+    return { success: false, error: verification.error || 'Invalid or expired reset authorization.' };
+  }
+
+  var targetId = verification.employeeId;
+  var sheet = getOrCreateSheet();
+  var data = sheet.getDataRange().getValues();
+  var rowIndex = -1;
+
+  for (var i = 1; i < data.length; i++) {
+    if ((data[i][0] || '').toString().trim().toUpperCase() === targetId) {
+      rowIndex = i + 1;
+      break;
+    }
+  }
+
+  if (rowIndex === -1) {
+    return { success: false, error: 'Employee record not found.' };
+  }
+
+  // Compute secure salted hash + pepper
+  var newPassHash = hashPassword(newPassword);
+  sheet.getRange(rowIndex, 6).setValue(newPassHash);
+  sheet.getRange(rowIndex, 10).setValue(new Date().toISOString());
+
+  return {
+    success: true,
+    message: 'Password changed successfully. Please login with your new password.'
+  };
+}
+
+/**
+ * Generates an HMAC-signed single-use reset token valid for 10 minutes
+ */
+function generateResetToken(employeeId) {
+  var timestamp = Date.now().toString();
+  var nonce = Utilities.getUuid().substring(0, 8);
+  var payload = employeeId + '|RESET|' + timestamp + '|' + nonce;
+  var signature = Utilities.computeHmacSha256Signature(payload, getSecretKey());
+  var sigHex = signature.map(function(byte) {
+    var b = (byte < 0 ? byte + 256 : byte).toString(16);
+    return b.length === 1 ? '0' + b : b;
+  }).join('');
+
+  var rawToken = payload + '|' + sigHex;
+  return Utilities.base64Encode(rawToken);
+}
+
+/**
+ * Validates reset token signature, 10-minute expiration, and enforces strict atomic single-use behavior.
+ * Uses LockService to prevent race conditions during simultaneous requests.
+ * Uses PropertiesService for persistent consumed-token state, supplemented by CacheService for fast access.
+ */
+function verifyAndConsumeResetToken(token) {
+  if (!token) return { valid: false, error: 'Reset token is required.' };
+  try {
+    var decoded = Utilities.newBlob(Utilities.base64Decode(token)).getDataAsString();
+    var parts = decoded.split('|');
+    if (parts.length !== 5) {
+      return { valid: false, error: 'Invalid or malformed reset authorization.' };
+    }
+
+    var employeeId = (parts[0] || '').toString().trim().toUpperCase();
+    var tokenType = (parts[1] || '').toString().trim().toUpperCase();
+    var timestampStr = parts[2];
+    var timestamp = parseInt(timestampStr, 10);
+    var nonce = parts[3];
+    var providedSig = parts[4];
+
+    if (!employeeId || tokenType !== 'RESET' || isNaN(timestamp) || !providedSig || !nonce) {
+      return { valid: false, error: 'Invalid reset authorization payload.' };
+    }
+
+    // 10 minutes maximum validity (600,000 ms) + 1 min future drift tolerance
+    var maxAgeMs = 10 * 60 * 1000;
+    var now = Date.now();
+    if (now - timestamp > maxAgeMs || timestamp > now + 60000) {
+      return { valid: false, error: 'Reset session has expired. Please verify your Date of Birth again.' };
+    }
+
+    // Verify HMAC-SHA256 signature
+    var payload = parts[0] + '|' + parts[1] + '|' + parts[2] + '|' + parts[3];
+    var expectedSigBytes = Utilities.computeHmacSha256Signature(payload, getSecretKey());
+    var expectedSig = expectedSigBytes.map(function(byte) {
+      var b = (byte < 0 ? byte + 256 : byte).toString(16);
+      return b.length === 1 ? '0' + b : b;
+    }).join('');
+
+    if (providedSig !== expectedSig) {
+      return { valid: false, error: 'Invalid reset token signature.' };
+    }
+
+    // Acquire ScriptLock for atomic check-and-consume concurrency protection
+    var lock = LockService.getScriptLock();
+    var hasLock = lock.tryLock(10000); // 10 second bounded timeout
+
+    if (!hasLock) {
+      return { valid: false, error: 'Server busy. Please retry resetting your password in a moment.' };
+    }
+
+    try {
+      var storageKey = 'USED_RESET_' + employeeId + '_' + nonce;
+      var props = PropertiesService.getScriptProperties();
+      var cache = CacheService.getScriptCache();
+
+      // Check persistent storage first, then fast cache layer
+      var isConsumedInProps = props.getProperty(storageKey) !== null;
+      var isConsumedInCache = cache.get(storageKey) !== null;
+
+      if (isConsumedInProps || isConsumedInCache) {
+        return { valid: false, error: 'This reset authorization has already been used. Please request a new verification.' };
+      }
+
+      // Mark token as consumed atomically in persistent state
+      props.setProperty(storageKey, now.toString());
+      // Update cache state as supplementary layer
+      cache.put(storageKey, 'CONSUMED', 900); // 15 min TTL
+
+      // Prune old consumed token records older than 15 minutes
+      cleanupExpiredUsedTokens(props, now);
+
+      return {
+        valid: true,
+        employeeId: employeeId
+      };
+    } finally {
+      // Always release lock
+      lock.releaseLock();
+    }
+  } catch (err) {
+    return { valid: false, error: 'Invalid reset token format.' };
+  }
+}
+
+/**
+ * Periodically cleans up consumed token records older than 15 minutes from PropertiesService
+ */
+function cleanupExpiredUsedTokens(props, nowTime) {
+  try {
+    var allProps = props.getProperties();
+    var fifteenMinMs = 15 * 60 * 1000;
+    for (var key in allProps) {
+      if (key.indexOf('USED_RESET_') === 0) {
+        var recordedTime = parseInt(allProps[key], 10);
+        if (!isNaN(recordedTime) && (nowTime - recordedTime > fifteenMinMs)) {
+          props.deleteProperty(key);
+        }
+      }
+    }
+  } catch (e) {
+    // Non-blocking cleanup
+  }
+}
+
+/**
+ * Check rate limit for DOB verification attempts
+ */
+function checkDobRateLimit(employeeId) {
+  try {
+    var cache = CacheService.getScriptCache();
+    var limitKey = 'DOB_ATTEMPTS_' + employeeId;
+    var count = parseInt(cache.get(limitKey) || '0', 10);
+    return count < 5;
+  } catch (e) {
+    return true;
+  }
+}
+
+function recordFailedDobAttempt(employeeId) {
+  try {
+    var cache = CacheService.getScriptCache();
+    var limitKey = 'DOB_ATTEMPTS_' + employeeId;
+    var count = parseInt(cache.get(limitKey) || '0', 10);
+    cache.put(limitKey, (count + 1).toString(), 900); // 15 min lock
+  } catch (e) {}
+}
+
+function clearDobRateLimit(employeeId) {
+  try {
+    var cache = CacheService.getScriptCache();
+    cache.remove('DOB_ATTEMPTS_' + employeeId);
+  } catch (e) {}
+}
+
+/**
+ * Normalizes Date objects and date strings (YYYY-MM-DD, DD/MM/YYYY, DD-MM-YYYY) to canonical YYYY-MM-DD.
+ * Strictly verifies calendar days (e.g. rejects 31/02/2020) and rejects future dates.
+ */
+function normalizeDob(val) {
+  if (!val) return '';
+
+  var year = 0;
+  var month = 0;
+  var day = 0;
+
+  if (val instanceof Date) {
+    if (isNaN(val.getTime())) return '';
+    year = val.getFullYear();
+    month = val.getMonth() + 1;
+    day = val.getDate();
+  } else {
+    var str = val.toString().trim();
+    if (str.indexOf('T') !== -1) {
+      str = str.split('T')[0];
+    }
+
+    // YYYY-MM-DD or YYYY/MM/DD or YYYY.MM.DD
+    var isoMatch = str.match(/^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})$/);
+    if (isoMatch) {
+      year = parseInt(isoMatch[1], 10);
+      month = parseInt(isoMatch[2], 10);
+      day = parseInt(isoMatch[3], 10);
+    } else {
+      // DD/MM/YYYY or DD-MM-YYYY or DD.MM.YYYY
+      var dmyMatch = str.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})$/);
+      if (dmyMatch) {
+        day = parseInt(dmyMatch[1], 10);
+        month = parseInt(dmyMatch[2], 10);
+        year = parseInt(dmyMatch[3], 10);
+      } else {
+        var parsed = new Date(str);
+        if (!isNaN(parsed.getTime())) {
+          year = parsed.getFullYear();
+          month = parsed.getMonth() + 1;
+          day = parsed.getDate();
+        } else {
+          return '';
+        }
+      }
+    }
+  }
+
+  if (month < 1 || month > 12 || day < 1 || day > 31 || year < 1900) {
+    return '';
+  }
+
+  // Exact calendar validation to reject non-existent dates like 31/02/2020
+  var calendarCheck = new Date(year, month - 1, day);
+  if (
+    calendarCheck.getFullYear() !== year ||
+    (calendarCheck.getMonth() + 1) !== month ||
+    calendarCheck.getDate() !== day
+  ) {
+    return ''; // Invalid calendar day
+  }
+
+  // Reject future DOBs
+  var today = new Date();
+  today.setHours(23, 59, 59, 999);
+  if (calendarCheck > today) {
+    return ''; // Future DOB rejected
+  }
+
+  var formattedMonth = ('0' + month).slice(-2);
+  var formattedDay = ('0' + day).slice(-2);
+  return year + '-' + formattedMonth + '-' + formattedDay;
 }
 
 // ==========================================
