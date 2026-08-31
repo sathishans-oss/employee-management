@@ -7,8 +7,6 @@ import {
   UserCheck,
   LogOut,
   X,
-  Database,
-  Layers,
 } from 'lucide-react';
 import { AppRoute } from '../types';
 
@@ -111,17 +109,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
               </button>
             );
           })}
-        </div>
-
-        {/* Phase Info & System Badge */}
-        <div className="p-4 border-t border-slate-100 bg-slate-50/50 m-3 rounded-2xl border">
-          <div className="flex items-center gap-2 text-xs font-semibold text-slate-700 mb-1">
-            <Layers className="w-3.5 h-3.5 text-blue-600" />
-            <span>Phase 3 • Live Workflow</span>
-          </div>
-          <p className="text-[11px] text-slate-500 leading-relaxed">
-            Google Sheets + Google Apps Script backend active.
-          </p>
         </div>
 
         {/* Logout at bottom of sidebar */}

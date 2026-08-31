@@ -17,7 +17,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onLoginSuccess }) => {
       </div>
 
       <footer className="mt-8 text-center text-xs text-slate-400 font-medium">
-        Employee Profile Management System &bull; Secure Google Sheets &amp; Apps Script Backend
+        Employee Profile Management System &bull; Nursing Informatics 
       </footer>
     </div>
   );
