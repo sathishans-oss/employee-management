@@ -6,7 +6,7 @@
  * Network/server errors are returned directly to the user; live requests NEVER silently fall back to mock data.
  */
 
-import { APP_CONFIG, GOOGLE_APPS_SCRIPT_URL } from '../config';
+import { APP_CONFIG, GOOGLE_APPS_SCRIPT_URL, shouldUseAppsScriptProxy } from '../config';
 import { ApiResponse, AuthUser, Employee, EmployeeFormData, LoginCredentials, VerifyDobResponseData } from '../types';
 import { normalizeDob } from '../utils/validation';
 
@@ -39,37 +39,24 @@ async function callGoogleAppsScript<T = any>(payload: Record<string, any>): Prom
     };
   }
 
-  const isBrowser = typeof window !== 'undefined';
+  const useProxy = shouldUseAppsScriptProxy();
   const proxyEndpoint = '/api/apps-script';
 
   try {
-    let response: Response | null = null;
-    let usedUrl = directUrl;
+    let response: Response;
+    let targetDescription: string;
 
-    // 1. In Google AI Studio / Node environment, use same-origin server proxy to completely bypass iframe cross-origin redirect/CORS restrictions
-    if (isBrowser) {
-      try {
-        const proxyRes = await fetch(proxyEndpoint, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify(payload),
-        });
-
-        // If proxy endpoint responded (not a 404 from static host)
-        if (proxyRes.status !== 404 && proxyRes.status !== 502) {
-          response = proxyRes;
-          usedUrl = proxyEndpoint;
-        }
-      } catch {
-        // Fall back to direct fetch if proxy is not reachable
-      }
-    }
-
-    // 2. Direct fetch fallback (used when deployed on standalone static hosts like Cloudflare Pages)
-    if (!response) {
-      usedUrl = directUrl;
+    if (useProxy) {
+      targetDescription = 'Internal Proxy (/api/apps-script)';
+      response = await fetch(proxyEndpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(payload),
+      });
+    } else {
+      targetDescription = 'Direct Apps Script';
       response = await fetch(directUrl, {
         method: 'POST',
         mode: 'cors',
@@ -82,7 +69,7 @@ async function callGoogleAppsScript<T = any>(payload: Record<string, any>): Prom
     }
 
     const contentType = response.headers.get('content-type') || 'unknown';
-    console.log(`[API Diagnostic] Action: "${actionName}" | Target: ${usedUrl === proxyEndpoint ? 'Internal Proxy (/api/apps-script)' : 'Direct Apps Script'} | HTTP Status: ${response.status} | Content-Type: ${contentType}`);
+    console.log(`[API Diagnostic] Action: "${actionName}" | Target: ${targetDescription} | HTTP Status: ${response.status} | Content-Type: ${contentType}`);
 
     if (!response.ok) {
       console.warn(`[API Diagnostic] Action: "${actionName}" HTTP error: ${response.status}`);

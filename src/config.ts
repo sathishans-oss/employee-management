@@ -15,6 +15,40 @@ export const GOOGLE_APPS_SCRIPT_URL =
   'https://script.google.com/macros/s/AKfycbzxS4q-MuhU-_-zrLA1QmQ639bqZwSYhzEoK7V90RhBW21Iq63I6QR-rXqAllr_KsFo7w/exec'; 
   // e.g. "https://script.google.com/macros/s/AKfycbx.../exec"
 
+/**
+ * Determines whether to route API requests through the local Express proxy (/api/apps-script)
+ * or communicate directly with the Google Apps Script Web App URL.
+ * 
+ * - Google AI Studio / Cloud Run (server.ts running): uses /api/apps-script to avoid iframe cross-origin redirect blocks.
+ * - Cloudflare Pages / Static Deployments (no Express backend): communicates directly with Google Apps Script Web App.
+ */
+export function shouldUseAppsScriptProxy(): boolean {
+  const envVal = (import.meta as any).env?.VITE_USE_APPS_SCRIPT_PROXY;
+  if (envVal !== undefined && envVal !== '') {
+    return envVal === 'true' || envVal === true;
+  }
+
+  if (typeof window !== 'undefined') {
+    const hostname = window.location.hostname;
+    // Static hosting environments without Express backend
+    if (
+      hostname.endsWith('.pages.dev') ||
+      hostname.endsWith('.workers.dev') ||
+      hostname.endsWith('.github.io') ||
+      hostname.endsWith('.netlify.app') ||
+      hostname.endsWith('.vercel.app')
+    ) {
+      return false;
+    }
+    // Environments with server.ts running
+    if (hostname.includes('.run.app') || hostname === 'localhost' || hostname === '127.0.0.1') {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 
 export const APP_CONFIG = {
   // Application details
